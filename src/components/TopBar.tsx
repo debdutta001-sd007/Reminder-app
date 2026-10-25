@@ -6,7 +6,8 @@ import {
   Check, 
   RotateCcw,
   Wifi,
-  BatteryMedium
+  BatteryMedium,
+  Database
 } from 'lucide-react';
 
 interface TopBarProps {
@@ -14,13 +15,15 @@ interface TopBarProps {
   onViewChange: (view: ViewMode) => void;
   onOpenNewTask: () => void;
   onOpenProfile: () => void;
+  onOpenFullstackHub: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
   currentView,
   onViewChange,
   onOpenNewTask,
-  onOpenProfile
+  onOpenProfile,
+  onOpenFullstackHub
 }) => {
   const { 
     currentUser, 
@@ -147,6 +150,17 @@ export const TopBar: React.FC<TopBarProps> = ({
               </div>
             ))}
           </div>
+
+          {/* Fullstack Hub Button */}
+          <button
+            onClick={onOpenFullstackHub}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-300 bg-indigo-950/40 hover:bg-indigo-900/50 border border-indigo-800/60 rounded-xl transition-colors whitespace-nowrap"
+            title="Fullstack Workspace Hub: Persistent Database, Rooms Manager, Analytics, and Backups"
+          >
+            <Database className="w-3.5 h-3.5 text-indigo-400" />
+            <span className="hidden md:inline">Fullstack Hub</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          </button>
 
           {/* Share Room Button */}
           <button

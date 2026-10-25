@@ -15,7 +15,8 @@ import { ActivityToasts } from './components/ActivityToasts.tsx';
 import { TaskDrawer } from './components/TaskDrawer.tsx';
 import { NewTaskModal } from './components/NewTaskModal.tsx';
 import { UserProfileModal } from './components/UserProfileModal.tsx';
-import { CheckCircle2, Clock, AlertTriangle, Users, Layers, Mic } from 'lucide-react';
+import { FullstackWorkspaceModal } from './components/FullstackWorkspaceModal.tsx';
+import { CheckCircle2, Clock, AlertTriangle, Users, Layers, Mic, Database } from 'lucide-react';
 
 const WorkspaceMain: React.FC = () => {
   const { tasks, userCount, connectionStatus, roomId } = useWorkspace();
@@ -26,6 +27,7 @@ const WorkspaceMain: React.FC = () => {
   const [newTaskInitialStatus, setNewTaskInitialStatus] = useState<TaskStatus>('todo');
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isFullstackHubOpen, setIsFullstackHubOpen] = useState(false);
   const [activeAmbientBg, setActiveAmbientBg] = useState<string | null>(null);
 
   // Keyboard shortcuts
@@ -80,6 +82,7 @@ const WorkspaceMain: React.FC = () => {
           setIsNewTaskOpen(true);
         }}
         onOpenProfile={() => setIsProfileOpen(true)}
+        onOpenFullstackHub={() => setIsFullstackHubOpen(true)}
       />
 
       {/* Main Android Workspace Body */}
@@ -110,8 +113,18 @@ const WorkspaceMain: React.FC = () => {
             )}
           </div>
 
-          {/* Real-Time Sync & Voice Quick Trigger */}
+          {/* Real-Time Sync, Voice & Fullstack DB Status Quick Triggers */}
           <div className="flex items-center gap-3 text-xs text-slate-400">
+            <button
+              onClick={() => setIsFullstackHubOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-indigo-950/40 hover:bg-indigo-900/50 border border-indigo-800/60 text-indigo-300 rounded-lg font-mono text-[11px] transition-colors"
+              title="Fullstack Workspace Hub: Persistent DB, Rooms Manager, Analytics"
+            >
+              <Database className="w-3 h-3 text-indigo-400" />
+              <span>Persistent DB</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            </button>
+
             <button
               onClick={() => setIsVoiceModalOpen(true)}
               className="flex items-center gap-1 px-2.5 py-1 bg-red-950/40 hover:bg-red-900/50 border border-red-800/60 text-red-400 rounded-lg font-mono text-[11px] transition-colors"
@@ -222,6 +235,11 @@ const WorkspaceMain: React.FC = () => {
       <UserProfileModal
         isOpen={isProfileOpen}
         onClose={() => setIsProfileOpen(false)}
+      />
+
+      <FullstackWorkspaceModal
+        isOpen={isFullstackHubOpen}
+        onClose={() => setIsFullstackHubOpen(false)}
       />
     </div>
   );

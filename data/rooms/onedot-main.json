@@ -1,0 +1,224 @@
+{
+  "id": "onedot-main",
+  "name": "Main Android Workspace",
+  "createdAt": "2026-10-25T09:22:40.765Z",
+  "updatedAt": "2026-10-25T09:23:10.368Z",
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Design OneDot multi-view task canvas",
+      "description": "Create responsive visual architecture for Kanban columns, Eisenhower priority quadrants, and high-density list views.",
+      "status": "in_progress",
+      "priority": "urgent",
+      "urgency": true,
+      "importance": true,
+      "tags": [
+        "Design",
+        "UI/UX"
+      ],
+      "dueDate": "2026-10-26",
+      "subtasks": [
+        {
+          "id": "sub-1",
+          "text": "Define 60-30-10 neutral color tokens",
+          "completed": true
+        },
+        {
+          "id": "sub-2",
+          "text": "Implement zero-pill metadata typography",
+          "completed": true
+        },
+        {
+          "id": "sub-3",
+          "text": "Build Eisenhower 4-quadrant dot matrix view",
+          "completed": false
+        }
+      ],
+      "comments": [
+        {
+          "id": "c-1",
+          "author": "Sarah C.",
+          "avatarColor": "#059669",
+          "text": "Loving the dot grid visual density!",
+          "createdAt": "2026-10-25T00:15:00Z"
+        }
+      ],
+      "assignee": {
+        "name": "Sarah C.",
+        "avatarColor": "#059669"
+      },
+      "difficulty": "hard",
+      "estimatedMinutes": 180,
+      "createdBy": "System",
+      "createdAt": "2026-10-24T18:00:00Z",
+      "updatedAt": "2026-10-25T00:20:00Z"
+    },
+    {
+      "id": "task-2",
+      "title": "Real-time WebSocket presence & collaborative cursor sync",
+      "description": "Broadcast sub-200ms cursor positions, room joins, task drag-and-drop operations, and active card focus rings.",
+      "status": "in_progress",
+      "priority": "high",
+      "urgency": true,
+      "importance": true,
+      "tags": [
+        "Engineering",
+        "WebSockets"
+      ],
+      "dueDate": "2026-10-27",
+      "subtasks": [
+        {
+          "id": "sub-4",
+          "text": "Setup native ws server on port 3000",
+          "completed": true
+        },
+        {
+          "id": "sub-5",
+          "text": "Implement optimistic client updates",
+          "completed": true
+        },
+        {
+          "id": "sub-6",
+          "text": "Broadcast peer cursor coordinates with lerp",
+          "completed": false
+        }
+      ],
+      "comments": [
+        {
+          "id": "c-2",
+          "author": "Alex M.",
+          "avatarColor": "#4F46E5",
+          "text": "Server is authoritative; client handles optimistic reconciliation.",
+          "createdAt": "2026-10-25T00:25:00Z"
+        }
+      ],
+      "assignee": {
+        "name": "Alex M.",
+        "avatarColor": "#4F46E5"
+      },
+      "difficulty": "medium",
+      "estimatedMinutes": 90,
+      "createdBy": "System",
+      "createdAt": "2026-10-24T19:30:00Z",
+      "updatedAt": "2026-10-25T00:30:00Z"
+    },
+    {
+      "id": "task-3",
+      "title": "Integrated Pomodoro focus interval timer",
+      "description": "Distraction-free 25-minute timer linked to the active task, tracking focus streak and sound alerts.",
+      "status": "todo",
+      "priority": "medium",
+      "urgency": false,
+      "importance": true,
+      "tags": [
+        "Productivity",
+        "Focus"
+      ],
+      "dueDate": "2026-10-28",
+      "subtasks": [
+        {
+          "id": "sub-7",
+          "text": "Add start/pause/reset states",
+          "completed": true
+        },
+        {
+          "id": "sub-8",
+          "text": "Web Audio API bell notification",
+          "completed": true
+        },
+        {
+          "id": "sub-9",
+          "text": "Link timer directly to selected task",
+          "completed": false
+        }
+      ],
+      "comments": [],
+      "assignee": {
+        "name": "Debdutta D.",
+        "avatarColor": "#D97706"
+      },
+      "difficulty": "easy",
+      "estimatedMinutes": 30,
+      "createdBy": "System",
+      "createdAt": "2026-10-24T20:00:00Z",
+      "updatedAt": "2026-10-24T20:00:00Z"
+    },
+    {
+      "id": "task-4",
+      "title": "Audit WCAG AA accessibility & keyboard shortcuts",
+      "description": "Ensure focus rings, Cmd/Ctrl+K quick action search, Esc to dismiss modal, and tabular numbers are verified.",
+      "status": "backlog",
+      "priority": "low",
+      "urgency": false,
+      "importance": true,
+      "tags": [
+        "QA",
+        "A11y"
+      ],
+      "dueDate": "2026-10-30",
+      "subtasks": [
+        {
+          "id": "sub-10",
+          "text": "Check contrast on dark and light surfaces",
+          "completed": true
+        },
+        {
+          "id": "sub-11",
+          "text": "Ensure touch targets >= 40px",
+          "completed": true
+        }
+      ],
+      "comments": [],
+      "assignee": null,
+      "difficulty": "easy",
+      "estimatedMinutes": 45,
+      "createdBy": "System",
+      "createdAt": "2026-10-24T21:00:00Z",
+      "updatedAt": "2026-10-24T21:00:00Z"
+    },
+    {
+      "id": "task-5",
+      "title": "Deploy OneDot collaborative room sharing",
+      "description": "Generate shareable room codes and links for instant multi-user synchronization.",
+      "status": "done",
+      "priority": "high",
+      "urgency": false,
+      "importance": false,
+      "tags": [
+        "Release",
+        "Infra"
+      ],
+      "dueDate": "2026-10-25",
+      "subtasks": [
+        {
+          "id": "sub-12",
+          "text": "URL query parameter ?room=XYZ",
+          "completed": true
+        },
+        {
+          "id": "sub-13",
+          "text": "Copy room invite link button",
+          "completed": true
+        }
+      ],
+      "comments": [
+        {
+          "id": "c-3",
+          "author": "Elena R.",
+          "avatarColor": "#9333EA",
+          "text": "Tested with 4 simultaneous tabs — syncing instantly!",
+          "createdAt": "2026-10-25T00:35:00Z"
+        }
+      ],
+      "assignee": {
+        "name": "Elena R.",
+        "avatarColor": "#9333EA"
+      },
+      "difficulty": "medium",
+      "estimatedMinutes": 60,
+      "createdBy": "System",
+      "createdAt": "2026-10-24T17:00:00Z",
+      "updatedAt": "2026-10-25T00:40:00Z"
+    }
+  ]
+}

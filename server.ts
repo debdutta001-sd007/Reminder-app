@@ -5,6 +5,18 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
+import { 
+  initStorage, 
+  getOrCreateRoomRecord, 
+  saveRoomRecord, 
+  listAllRooms, 
+  createRoomRecord, 
+  calculateRoomStats,
+  Task, 
+  Subtask, 
+  TaskComment,
+  RoomRecord 
+} from './server/db.ts';
 
 dotenv.config();
 
@@ -15,41 +27,10 @@ const app = express();
 const port = parseInt(process.env.PORT || '3000', 10);
 const server = http.createServer(app);
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-export interface Subtask {
-  id: string;
-  text: string;
-  completed: boolean;
-}
-
-export interface TaskComment {
-  id: string;
-  author: string;
-  avatarColor: string;
-  text: string;
-  createdAt: string;
-}
-
-export interface Task {
-  id: string;
-  title: string;
-  description: string;
-  status: 'backlog' | 'todo' | 'in_progress' | 'review' | 'done';
-  priority: 'low' | 'medium' | 'high' | 'urgent';
-  urgency: boolean;     // Urgent axis (Eisenhower Matrix)
-  importance: boolean;  // Important axis (Eisenhower Matrix)
-  tags: string[];
-  dueDate: string | null;
-  subtasks: Subtask[];
-  comments: TaskComment[];
-  assignee: { name: string; avatarColor: string } | null;
-  difficulty?: 'easy' | 'medium' | 'hard';
-  estimatedMinutes?: number;
-  createdBy: string;
-  createdAt: string;
-  updatedAt: string;
-}
+// Initialize Persistent Storage
+initStorage();
 
 export interface PeerPresence {
   id: string;
@@ -81,6 +62,8 @@ const defaultSeedTasks: Task[] = [
       { id: 'c-1', author: 'Sarah C.', avatarColor: '#059669', text: 'Loving the dot grid visual density!', createdAt: '2026-10-25T00:15:00Z' }
     ],
     assignee: { name: 'Sarah C.', avatarColor: '#059669' },
+    difficulty: 'hard',
+    estimatedMinutes: 180,
     createdBy: 'System',
     createdAt: '2026-10-24T18:00:00Z',
     updatedAt: '2026-10-25T00:20:00Z'
@@ -104,6 +87,8 @@ const defaultSeedTasks: Task[] = [
       { id: 'c-2', author: 'Alex M.', avatarColor: '#4F46E5', text: 'Server is authoritative; client handles optimistic reconciliation.', createdAt: '2026-10-25T00:25:00Z' }
     ],
     assignee: { name: 'Alex M.', avatarColor: '#4F46E5' },
+    difficulty: 'medium',
+    estimatedMinutes: 90,
     createdBy: 'System',
     createdAt: '2026-10-24T19:30:00Z',
     updatedAt: '2026-10-25T00:30:00Z'
@@ -125,6 +110,8 @@ const defaultSeedTasks: Task[] = [
     ],
     comments: [],
     assignee: { name: 'Debdutta D.', avatarColor: '#D97706' },
+    difficulty: 'easy',
+    estimatedMinutes: 30,
     createdBy: 'System',
     createdAt: '2026-10-24T20:00:00Z',
     updatedAt: '2026-10-24T20:00:00Z'
@@ -145,6 +132,8 @@ const defaultSeedTasks: Task[] = [
     ],
     comments: [],
     assignee: null,
+    difficulty: 'easy',
+    estimatedMinutes: 45,
     createdBy: 'System',
     createdAt: '2026-10-24T21:00:00Z',
     updatedAt: '2026-10-24T21:00:00Z'
@@ -167,45 +156,34 @@ const defaultSeedTasks: Task[] = [
       { id: 'c-3', author: 'Elena R.', avatarColor: '#9333EA', text: 'Tested with 4 simultaneous tabs — syncing instantly!', createdAt: '2026-10-25T00:35:00Z' }
     ],
     assignee: { name: 'Elena R.', avatarColor: '#9333EA' },
+    difficulty: 'medium',
+    estimatedMinutes: 60,
     createdBy: 'System',
     createdAt: '2026-10-24T17:00:00Z',
     updatedAt: '2026-10-25T00:40:00Z'
   }
 ];
 
-// Room-based state storage
-const rooms = new Map<string, {
-  tasks: Task[];
-  peers: Map<string, { ws: WebSocket; presence: PeerPresence }>;
-}>();
+// In-Memory WebSockets and Presence per room
+const peerSessions = new Map<string, Map<string, { ws: WebSocket; presence: PeerPresence }>>();
 
-function getOrCreateRoom(roomId: string) {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, {
-      tasks: JSON.parse(JSON.stringify(defaultSeedTasks)),
-      peers: new Map()
-    });
+function getPeerSessions(roomId: string) {
+  if (!peerSessions.has(roomId)) {
+    peerSessions.set(roomId, new Map());
   }
-  return rooms.get(roomId)!;
+  return peerSessions.get(roomId)!;
 }
 
-// REST Endpoints
-app.get('/api/health', (req, res) => {
-  let totalPeers = 0;
-  rooms.forEach(r => totalPeers += r.peers.size);
-  res.json({
-    status: 'ok',
-    uptime: process.uptime(),
-    roomsCount: rooms.size,
-    totalPeers
+function broadcastToRoom(roomId: string, message: object, excludePeerId?: string) {
+  const sessions = peerSessions.get(roomId);
+  if (!sessions) return;
+  const str = JSON.stringify(message);
+  sessions.forEach((peerObj, pId) => {
+    if (pId !== excludePeerId && peerObj.ws.readyState === WebSocket.OPEN) {
+      peerObj.ws.send(str);
+    }
   });
-});
-
-app.get('/api/tasks', (req, res) => {
-  const roomId = (req.query.room as string) || 'onedot-main';
-  const room = getOrCreateRoom(roomId);
-  res.json({ tasks: room.tasks });
-});
+}
 
 // SSE client registry for live wallpaper push updates
 const wallpaperSseClients = new Map<string, Set<express.Response>>();
@@ -224,12 +202,394 @@ function broadcastWallpaperUpdate(roomId: string) {
   }
 }
 
-// Dynamic real-time vector wallpaper endpoint for Android Tasker, MacroDroid, and lock screen feeds
+// ==========================================
+// FULLSTACK RESTful API ENDPOINTS
+// ==========================================
+
+// 1. Health & Database Diagnostic Endpoint
+app.get('/api/health', (req, res) => {
+  let totalPeers = 0;
+  peerSessions.forEach(m => totalPeers += m.size);
+  const rooms = listAllRooms();
+  const totalTasks = rooms.reduce((acc, r) => acc + r.taskCount, 0);
+
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    database: {
+      type: 'persistent-json-file-db',
+      status: 'healthy',
+      roomsCount: rooms.length,
+      totalStoredTasks: totalTasks
+    },
+    activePeers: totalPeers
+  });
+});
+
+// 2. Rooms API: List & Create Rooms
+app.get('/api/rooms', (req, res) => {
+  const rooms = listAllRooms();
+  res.json({ success: true, rooms });
+});
+
+app.post('/api/rooms', async (req, res) => {
+  try {
+    const { roomId, name } = req.body;
+    if (!roomId || !roomId.trim()) {
+      return res.status(400).json({ error: 'Room ID is required' });
+    }
+    const safeId = roomId.trim().toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+    const room = await createRoomRecord(safeId, name, defaultSeedTasks);
+    res.status(201).json({ success: true, room });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to create room', message: (err as Error).message });
+  }
+});
+
+// 3. Workspace Analytics & Statistics Endpoint
+app.get('/api/stats', (req, res) => {
+  const roomId = (req.query.room as string) || 'onedot-main';
+  const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+  const stats = calculateRoomStats(record.tasks);
+  res.json({ success: true, roomId, stats });
+});
+
+// 4. Tasks Query API with Server-Side Filtering
+app.get('/api/tasks', (req, res) => {
+  const roomId = (req.query.room as string) || 'onedot-main';
+  const { status, priority, difficulty, search, tag } = req.query;
+  const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+  
+  let tasks = [...record.tasks];
+
+  if (status) {
+    tasks = tasks.filter(t => t.status === status);
+  }
+  if (priority) {
+    tasks = tasks.filter(t => t.priority === priority);
+  }
+  if (difficulty) {
+    tasks = tasks.filter(t => t.difficulty === difficulty);
+  }
+  if (tag) {
+    tasks = tasks.filter(t => t.tags && t.tags.includes(tag as string));
+  }
+  if (search && typeof search === 'string') {
+    const term = search.toLowerCase();
+    tasks = tasks.filter(t => 
+      t.title.toLowerCase().includes(term) || 
+      t.description.toLowerCase().includes(term) ||
+      (t.tags && t.tags.some(tag => tag.toLowerCase().includes(term)))
+    );
+  }
+
+  res.json({ success: true, roomId, count: tasks.length, tasks });
+});
+
+// 5. Get Single Task
+app.get('/api/tasks/:id', (req, res) => {
+  const roomId = (req.query.room as string) || 'onedot-main';
+  const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+  const task = record.tasks.find(t => t.id === req.params.id);
+  if (!task) {
+    return res.status(404).json({ error: 'Task not found' });
+  }
+  res.json({ success: true, task });
+});
+
+// 6. Create Task via REST
+app.post('/api/tasks', async (req, res) => {
+  try {
+    const { room, task, by } = req.body;
+    const roomId = room || 'onedot-main';
+    if (!task || !task.title || !task.title.trim()) {
+      return res.status(400).json({ error: 'Task title is required' });
+    }
+
+    const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+    const newTask: Task = {
+      id: task.id || `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      title: task.title.trim(),
+      description: task.description || '',
+      status: task.status || 'todo',
+      priority: task.priority || 'medium',
+      urgency: typeof task.urgency === 'boolean' ? task.urgency : false,
+      importance: typeof task.importance === 'boolean' ? task.importance : true,
+      tags: Array.isArray(task.tags) ? task.tags : [],
+      dueDate: task.dueDate || null,
+      subtasks: Array.isArray(task.subtasks) ? task.subtasks : [],
+      comments: Array.isArray(task.comments) ? task.comments : [],
+      assignee: task.assignee || null,
+      difficulty: task.difficulty || 'medium',
+      estimatedMinutes: task.estimatedMinutes || (task.difficulty === 'hard' ? 120 : task.difficulty === 'easy' ? 25 : 60),
+      createdBy: by || 'User',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    record.tasks.unshift(newTask);
+    await saveRoomRecord(record);
+
+    // Broadcast to WebSocket peers and SSE
+    broadcastToRoom(roomId, {
+      type: 'task:created',
+      task: newTask,
+      by: by || 'Someone'
+    });
+    broadcastWallpaperUpdate(roomId);
+
+    res.status(201).json({ success: true, task: newTask });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to create task', message: (err as Error).message });
+  }
+});
+
+// 7. Update Task via REST
+app.put('/api/tasks/:id', async (req, res) => {
+  try {
+    const { room, task, by } = req.body;
+    const roomId = room || 'onedot-main';
+    const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+    const index = record.tasks.findIndex(t => t.id === req.params.id);
+
+    if (index === -1) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    record.tasks[index] = {
+      ...record.tasks[index],
+      ...task,
+      updatedAt: new Date().toISOString()
+    };
+
+    await saveRoomRecord(record);
+
+    broadcastToRoom(roomId, {
+      type: 'task:updated',
+      task: record.tasks[index],
+      by: by || 'Someone'
+    });
+    broadcastWallpaperUpdate(roomId);
+
+    res.json({ success: true, task: record.tasks[index] });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to update task', message: (err as Error).message });
+  }
+});
+
+// 8. Move Task (Status / Urgency / Importance)
+app.patch('/api/tasks/:id/move', async (req, res) => {
+  try {
+    const { room, status, urgency, importance, by } = req.body;
+    const roomId = room || 'onedot-main';
+    const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+    const task = record.tasks.find(t => t.id === req.params.id);
+
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    if (status) task.status = status;
+    if (typeof urgency === 'boolean') task.urgency = urgency;
+    if (typeof importance === 'boolean') task.importance = importance;
+    task.updatedAt = new Date().toISOString();
+
+    await saveRoomRecord(record);
+
+    broadcastToRoom(roomId, {
+      type: 'task:moved',
+      taskId: task.id,
+      status: task.status,
+      urgency: task.urgency,
+      importance: task.importance,
+      by: by || 'Someone'
+    });
+    broadcastWallpaperUpdate(roomId);
+
+    res.json({ success: true, task });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to move task', message: (err as Error).message });
+  }
+});
+
+// 9. Delete Task via REST
+app.delete('/api/tasks/:id', async (req, res) => {
+  try {
+    const roomId = (req.query.room as string) || 'onedot-main';
+    const by = (req.query.by as string) || 'Someone';
+    const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+    const initialLen = record.tasks.length;
+    record.tasks = record.tasks.filter(t => t.id !== req.params.id);
+
+    if (record.tasks.length === initialLen) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    await saveRoomRecord(record);
+
+    broadcastToRoom(roomId, {
+      type: 'task:deleted',
+      taskId: req.params.id,
+      by
+    });
+    broadcastWallpaperUpdate(roomId);
+
+    res.json({ success: true, taskId: req.params.id });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to delete task', message: (err as Error).message });
+  }
+});
+
+// 10. Subtask Toggle via REST
+app.patch('/api/tasks/:id/subtasks/:subtaskId', async (req, res) => {
+  try {
+    const { room, by } = req.body;
+    const roomId = room || 'onedot-main';
+    const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+    const task = record.tasks.find(t => t.id === req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    const sub = task.subtasks.find(s => s.id === req.params.subtaskId);
+    if (!sub) return res.status(404).json({ error: 'Subtask not found' });
+
+    sub.completed = !sub.completed;
+    task.updatedAt = new Date().toISOString();
+    await saveRoomRecord(record);
+
+    broadcastToRoom(roomId, {
+      type: 'task:subtask_toggled',
+      taskId: task.id,
+      subtaskId: sub.id,
+      completed: sub.completed,
+      by: by || 'Someone'
+    });
+    broadcastWallpaperUpdate(roomId);
+
+    res.json({ success: true, completed: sub.completed, subtask: sub });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to toggle subtask', message: (err as Error).message });
+  }
+});
+
+// 11. Add Comment via REST
+app.post('/api/tasks/:id/comments', async (req, res) => {
+  try {
+    const { room, comment } = req.body;
+    const roomId = room || 'onedot-main';
+    const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+    const task = record.tasks.find(t => t.id === req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    const newComment: TaskComment = {
+      id: `c-${Date.now()}`,
+      author: comment?.author || 'Anonymous',
+      avatarColor: comment?.avatarColor || '#4F46E5',
+      text: comment?.text || '',
+      createdAt: new Date().toISOString()
+    };
+
+    task.comments.push(newComment);
+    task.updatedAt = new Date().toISOString();
+    await saveRoomRecord(record);
+
+    broadcastToRoom(roomId, {
+      type: 'task:comment_added',
+      taskId: task.id,
+      comment: newComment,
+      by: newComment.author
+    });
+
+    res.status(201).json({ success: true, task, comment: newComment });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to add comment', message: (err as Error).message });
+  }
+});
+
+// 12. Backup Export (Full Room JSON)
+app.get('/api/export', (req, res) => {
+  const roomId = (req.query.room as string) || 'onedot-main';
+  const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+
+  const exportPayload = {
+    schemaVersion: '1.0',
+    exportedAt: new Date().toISOString(),
+    room: {
+      id: record.id,
+      name: record.name,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt
+    },
+    totalTasks: record.tasks.length,
+    tasks: record.tasks
+  };
+
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="onedot-workspace-${roomId}.json"`);
+  res.send(JSON.stringify(exportPayload, null, 2));
+});
+
+// 13. Backup Import / Restore
+app.post('/api/import', async (req, res) => {
+  try {
+    const { room, tasks, mode } = req.body;
+    const roomId = room || 'onedot-main';
+    if (!Array.isArray(tasks)) {
+      return res.status(400).json({ error: 'Invalid tasks array in payload' });
+    }
+
+    const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+    if (mode === 'replace') {
+      record.tasks = tasks;
+    } else {
+      // Merge mode: add non-duplicates
+      const existingIds = new Set(record.tasks.map(t => t.id));
+      tasks.forEach(t => {
+        if (!existingIds.has(t.id)) {
+          record.tasks.push(t);
+        }
+      });
+    }
+
+    await saveRoomRecord(record);
+
+    broadcastToRoom(roomId, {
+      type: 'tasks:synced',
+      tasks: record.tasks,
+      by: 'Import Tool'
+    });
+    broadcastWallpaperUpdate(roomId);
+
+    res.json({ success: true, count: record.tasks.length });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to import tasks', message: (err as Error).message });
+  }
+});
+
+// 14. Reset Room to Seed State
+app.post('/api/reset', async (req, res) => {
+  const roomId = (req.body.room as string) || 'onedot-main';
+  const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
+  record.tasks = JSON.parse(JSON.stringify(defaultSeedTasks));
+  await saveRoomRecord(record);
+  
+  broadcastToRoom(roomId, {
+    type: 'tasks:synced',
+    tasks: record.tasks,
+    by: 'System'
+  });
+  broadcastWallpaperUpdate(roomId);
+
+  res.json({ success: true, count: record.tasks.length });
+});
+
+// ==========================================
+// REAL-TIME ANDROID WALLPAPER ENGINE (SVG)
+// ==========================================
 app.get('/api/wallpaper.svg', (req, res) => {
   const roomId = (req.query.room as string) || 'onedot-main';
   const ratio = (req.query.ratio as string) || '20:9';
   const theme = (req.query.theme as string) || 'oled';
-  const room = getOrCreateRoom(roomId);
+  const record = getOrCreateRoomRecord(roomId, defaultSeedTasks);
 
   const now = new Date();
   const dayOfYear = Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / (1000 * 60 * 60 * 24));
@@ -243,14 +603,13 @@ app.get('/api/wallpaper.svg', (req, res) => {
   const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 
   // 4 active focus tasks + up to 3 most recently completed tasks in green light
-  const activeTasks = room.tasks.filter(t => t.status !== 'done').slice(0, 4);
-  const completedTasks = room.tasks
+  const activeTasks = record.tasks.filter(t => t.status !== 'done').slice(0, 4);
+  const completedTasks = record.tasks
     .filter(t => t.status === 'done')
     .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
     .slice(0, 3);
-  const completedCount = room.tasks.filter(t => t.status === 'done').length;
+  const completedCount = record.tasks.filter(t => t.status === 'done').length;
 
-  // Android standard 20:9 (1080x2400) or 19.5:9 (1080x2340) or Tablet (1920x1080)
   let width = 1080;
   let height = 2400;
   if (ratio === '16:9') {
@@ -260,7 +619,6 @@ app.get('/api/wallpaper.svg', (req, res) => {
     height = 2340;
   }
 
-  // Pure Black OLED Theme definitions
   let bgGradient = '<stop offset="0%" stop-color="#000000"/><stop offset="100%" stop-color="#050508"/>';
   if (theme === 'aurora') {
     bgGradient = '<stop offset="0%" stop-color="#021E17"/><stop offset="60%" stop-color="#000000"/><stop offset="100%" stop-color="#000000"/>';
@@ -294,23 +652,23 @@ app.get('/api/wallpaper.svg', (req, res) => {
     dotsSvg += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="1.5" ${filterAttr} />`;
   }
 
-  // Render active task items in SVG
+  // Active tasks in SVG
   let tasksSvg = '';
   const tasksStartY = 1380;
   const taskX = 140;
   let currentCardY = tasksStartY;
 
   activeTasks.forEach((task) => {
-    let priorityColor = '#3B82F6'; // Blue
+    let priorityColor = '#3B82F6';
     let filterAttr = '';
     let animClass = '';
 
     if (task.priority === 'urgent' || task.difficulty === 'hard') {
-      priorityColor = '#EF4444'; // Red
+      priorityColor = '#EF4444';
       filterAttr = 'filter="url(#glowRed)"';
       animClass = 'class="breathe-dot"';
     } else if (task.priority === 'high' || task.difficulty === 'medium') {
-      priorityColor = '#F97316'; // Orange
+      priorityColor = '#F97316';
       filterAttr = 'filter="url(#glowOrange)"';
       animClass = 'class="breathe-dot"';
     }
@@ -321,11 +679,8 @@ app.get('/api/wallpaper.svg', (req, res) => {
 
     tasksSvg += `
       <g transform="translate(${taskX}, ${currentCardY})">
-        <!-- OLED Card Background -->
         <rect x="0" y="0" width="800" height="88" rx="18" fill="#0E0E12" stroke="#1F1F28" stroke-width="1.5"/>
-        <!-- Active Dot with Breathing Glow for Red & Orange -->
         <circle cx="36" cy="44" r="8" fill="${priorityColor}" ${filterAttr} ${animClass}/>
-        <!-- Title -->
         <text x="65" y="52" fill="#F8FAFC" font-family="-apple-system, Roboto, sans-serif" font-size="28" font-weight="600">
           ${safeTitle.length > 34 ? safeTitle.slice(0, 34) + '...' : safeTitle}
         </text>
@@ -355,7 +710,6 @@ app.get('/api/wallpaper.svg', (req, res) => {
   if (completedTasks.length > 0) {
     const compHeaderY = currentCardY + 20;
     completedSvg += `
-      <!-- Completed Tasks Section in Glowing Green Light -->
       <g transform="translate(${taskX}, ${compHeaderY})">
         <text x="0" y="0" fill="#10B981" font-family="-apple-system, Roboto, sans-serif" font-size="22" font-weight="700" letter-spacing="1">
           RECENT COMPLETED (${completedTasks.length} SHOWN · GREEN LIGHT)
@@ -370,22 +724,13 @@ app.get('/api/wallpaper.svg', (req, res) => {
 
       completedSvg += `
         <g transform="translate(${taskX}, ${cY})">
-          <!-- OLED Dimmed Card Background -->
           <rect x="0" y="0" width="800" height="76" rx="16" fill="#09090D" stroke="#161620" stroke-width="1.2"/>
-          
-          <!-- Glowing Green Light Dot (#10B981) -->
           <circle cx="34" cy="38" r="9" fill="#10B981" filter="url(#glowGreen)"/>
           <circle cx="34" cy="38" r="4.5" fill="#FFFFFF"/>
-          
-          <!-- Green Light Checkmark Badge -->
           <path d="M 28 38 L 32 42 L 40 33" fill="none" stroke="#000000" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-          
-          <!-- Dimmed Line-Through Title -->
           <text x="65" y="46" fill="#64748B" font-family="-apple-system, Roboto, sans-serif" font-size="24" font-weight="500" text-decoration="line-through">
             ${truncatedTitle}
           </text>
-          
-          <!-- Completed status tag -->
           <text x="760" y="46" text-anchor="end" fill="#10B981" font-family="monospace" font-size="18" font-weight="600">
             DONE ✓
           </text>
@@ -415,7 +760,6 @@ app.get('/api/wallpaper.svg', (req, res) => {
       <circle cx="2" cy="2" r="0.8" fill="#1F1F28" fill-opacity="0.4" />
     </pattern>
 
-    <!-- Green Light Glow Filter for Completed Tasks -->
     <filter id="glowGreen" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur stdDeviation="6" result="blur1" />
       <feGaussianBlur stdDeviation="14" result="blur2" />
@@ -426,7 +770,6 @@ app.get('/api/wallpaper.svg', (req, res) => {
       </feMerge>
     </filter>
 
-    <!-- Orange Glow Filter for Active Focus Tasks -->
     <filter id="glowOrange" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur stdDeviation="5" result="blur1" />
       <feGaussianBlur stdDeviation="12" result="blur2" />
@@ -437,7 +780,6 @@ app.get('/api/wallpaper.svg', (req, res) => {
       </feMerge>
     </filter>
 
-    <!-- Red Glow Filter for Urgent Tasks -->
     <filter id="glowRed" x="-50%" y="-50%" width="200%" height="200%">
       <feGaussianBlur stdDeviation="6" result="blur1" />
       <feGaussianBlur stdDeviation="14" result="blur2" />
@@ -449,18 +791,14 @@ app.get('/api/wallpaper.svg', (req, res) => {
     </filter>
   </defs>
 
-  <!-- OLED Black Background Layer -->
   <rect width="100%" height="100%" fill="url(#bgGrad)" />
   <rect width="100%" height="100%" fill="url(#dotGrid)" />
 
-  <!-- Android Centered Punch-Hole Camera Clearance -->
   <circle cx="${width / 2}" cy="58" r="16" fill="#000000" stroke="#1F1F28" stroke-width="1.5" />
 
-  <!-- Android System Status Bar Area (Top Left & Right) -->
   <text x="90" y="65" fill="#94A3B8" font-family="monospace" font-size="24" font-weight="600">${timeStr}</text>
   <text x="${width - 90}" y="65" text-anchor="end" fill="#94A3B8" font-family="-apple-system, Roboto, sans-serif" font-size="22">5G · 100%</text>
 
-  <!-- Android Lock Screen Clock & Date Header -->
   <g transform="translate(140, 440)">
     <text x="0" y="0" fill="#FFFFFF" font-family="-apple-system, Roboto, sans-serif" font-size="160" font-weight="800" letter-spacing="-4">
       ${timeStr}
@@ -473,7 +811,6 @@ app.get('/api/wallpaper.svg', (req, res) => {
     </text>
   </g>
 
-  <!-- Year Progress Section -->
   <g transform="translate(140, 760)">
     <text x="0" y="0" fill="#CBD5E1" font-family="-apple-system, Roboto, sans-serif" font-size="24" font-weight="700" letter-spacing="1">
       ONEDOT ANDROID YEAR MATRIX (${yearPct}%)
@@ -481,7 +818,6 @@ app.get('/api/wallpaper.svg', (req, res) => {
   </g>
   ${dotsSvg}
 
-  <!-- Tasks Header -->
   <g transform="translate(140, 1310)">
     <text x="0" y="0" fill="#CBD5E1" font-family="-apple-system, Roboto, sans-serif" font-size="24" font-weight="700" letter-spacing="1">
       TODAY'S ANDROID FOCUS (${activeTasks.length} OPEN · ${completedCount} DONE)
@@ -490,10 +826,8 @@ app.get('/api/wallpaper.svg', (req, res) => {
   ${tasksSvg}
   ${completedSvg}
 
-  <!-- Android Gesture Pill Navigation Bar Clearance -->
   <rect x="${width / 2 - 120}" y="${height - 40}" width="240" height="6" rx="3" fill="#64748B" fill-opacity="0.6" />
 
-  <!-- Footer Watermark -->
   <g transform="translate(${width / 2}, ${height - 70})" text-anchor="middle">
     <text x="0" y="0" fill="#475569" font-family="monospace" font-size="20">
       OneDot Android Live Wallpaper · Green Light Completed Sync
@@ -506,7 +840,7 @@ app.get('/api/wallpaper.svg', (req, res) => {
   res.send(svgContent);
 });
 
-// Server-Sent Events (SSE) stream for instant real-time live wallpaper sync
+// SSE Wallpaper Stream Endpoint
 app.get('/api/wallpaper/stream', (req, res) => {
   const roomId = (req.query.room as string) || 'onedot-main';
 
@@ -521,10 +855,8 @@ app.get('/api/wallpaper/stream', (req, res) => {
   const clientSet = wallpaperSseClients.get(roomId)!;
   clientSet.add(res);
 
-  // Send initial event
   res.write(`event: connected\ndata: ${JSON.stringify({ roomId, timestamp: Date.now() })}\n\n`);
 
-  // Heartbeat / clock tick every 60 seconds
   const heartbeatTimer = setInterval(() => {
     try {
       res.write(`event: clock-tick\ndata: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
@@ -539,29 +871,9 @@ app.get('/api/wallpaper/stream', (req, res) => {
   });
 });
 
-app.post('/api/reset', (req, res) => {
-  const roomId = (req.body.room as string) || 'onedot-main';
-  const room = getOrCreateRoom(roomId);
-  room.tasks = JSON.parse(JSON.stringify(defaultSeedTasks));
-  
-  // Broadcast reset to all clients in the room
-  const payload = JSON.stringify({
-    type: 'tasks:synced',
-    tasks: room.tasks,
-    by: 'System'
-  });
-  room.peers.forEach(({ ws }) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
-    }
-  });
-
-  broadcastWallpaperUpdate(roomId);
-
-  res.json({ success: true, count: room.tasks.length });
-});
-
-// Gemini AI Client Configuration
+// ==========================================
+// GEMINI 3.8 FLASH AI ENDPOINTS
+// ==========================================
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
   httpOptions: {
@@ -571,7 +883,6 @@ const ai = new GoogleGenAI({
   }
 });
 
-// AI Voice & Natural Language Task Parser (Gemini 3.8 Flash)
 app.post('/api/ai/parse-task', async (req, res) => {
   try {
     const { voiceTranscript } = req.body;
@@ -621,7 +932,6 @@ Break the task down into 2 to 4 actionable subtasks.`;
   }
 });
 
-// AI Task Difficulty & Subtask Analyzer (Gemini 3.8 Flash)
 app.post('/api/ai/analyze-difficulty', async (req, res) => {
   try {
     const { title, description } = req.body;
@@ -668,25 +978,29 @@ Provide an explanation reasoning and 3-5 subtask steps to execute it smoothly.`;
   }
 });
 
-// WebSocket Server
+// ==========================================
+// WEBSOCKET REAL-TIME SYNC & COLLABORATION
+// ==========================================
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws: WebSocket) => {
   let currentRoomId = 'onedot-main';
   let peerId = '';
 
-  ws.on('message', (messageRaw: string) => {
+  ws.on('message', async (messageRaw: string) => {
     try {
       const data = JSON.parse(messageRaw.toString());
-      const room = getOrCreateRoom(data.roomId || currentRoomId);
+      const roomId = data.roomId || currentRoomId;
 
       switch (data.type) {
         case 'room:join': {
-          currentRoomId = data.roomId || 'onedot-main';
+          currentRoomId = roomId;
           peerId = data.peer.id;
 
-          const activeRoom = getOrCreateRoom(currentRoomId);
-          activeRoom.peers.set(peerId, {
+          const record = getOrCreateRoomRecord(currentRoomId, defaultSeedTasks);
+          const sessions = getPeerSessions(currentRoomId);
+
+          sessions.set(peerId, {
             ws,
             presence: {
               ...data.peer,
@@ -695,79 +1009,61 @@ wss.on('connection', (ws: WebSocket) => {
           });
 
           // Send initial state to the newcomer
-          const peerList = Array.from(activeRoom.peers.values())
+          const peerList = Array.from(sessions.values())
             .filter(p => p.presence.id !== peerId)
             .map(p => p.presence);
 
           ws.send(JSON.stringify({
             type: 'init',
-            tasks: activeRoom.tasks,
+            tasks: record.tasks,
             peers: peerList,
-            userCount: activeRoom.peers.size
+            userCount: sessions.size
           }));
 
           // Broadcast peer joined to others in the room
-          const joinMsg = JSON.stringify({
+          broadcastToRoom(currentRoomId, {
             type: 'peer:joined',
             peer: data.peer,
-            userCount: activeRoom.peers.size
-          });
-
-          activeRoom.peers.forEach((peerObj, pId) => {
-            if (pId !== peerId && peerObj.ws.readyState === WebSocket.OPEN) {
-              peerObj.ws.send(joinMsg);
-            }
-          });
+            userCount: sessions.size
+          }, peerId);
           break;
         }
 
         case 'cursor:move': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
-          const peerObj = activeRoom.peers.get(peerId);
+          const sessions = getPeerSessions(currentRoomId);
+          const peerObj = sessions.get(peerId);
           if (peerObj) {
             peerObj.presence.cursor = data.cursor;
             peerObj.presence.lastSeen = Date.now();
 
-            const cursorMsg = JSON.stringify({
+            broadcastToRoom(currentRoomId, {
               type: 'peer:cursor',
               peerId,
               cursor: data.cursor
-            });
-
-            activeRoom.peers.forEach((p, pId) => {
-              if (pId !== peerId && p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(cursorMsg);
-              }
-            });
+            }, peerId);
           }
           break;
         }
 
         case 'presence:update': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
-          const peerObj = activeRoom.peers.get(peerId);
+          const sessions = getPeerSessions(currentRoomId);
+          const peerObj = sessions.get(peerId);
           if (peerObj) {
             if (data.name) peerObj.presence.name = data.name;
             if (data.color) peerObj.presence.color = data.color;
             if (data.activeTaskId !== undefined) peerObj.presence.activeTaskId = data.activeTaskId;
             peerObj.presence.lastSeen = Date.now();
 
-            const updateMsg = JSON.stringify({
+            broadcastToRoom(currentRoomId, {
               type: 'peer:updated',
               peer: peerObj.presence
-            });
-
-            activeRoom.peers.forEach((p, pId) => {
-              if (pId !== peerId && p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(updateMsg);
-              }
-            });
+            }, peerId);
           }
           break;
         }
 
         case 'task:create': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
+          const record = getOrCreateRoomRecord(currentRoomId, defaultSeedTasks);
           const newTask: Task = {
             ...data.task,
             id: data.task.id || `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -775,20 +1071,14 @@ wss.on('connection', (ws: WebSocket) => {
             updatedAt: new Date().toISOString()
           };
 
-          // Idempotency: verify task doesn't already exist
-          if (!activeRoom.tasks.some(t => t.id === newTask.id)) {
-            activeRoom.tasks.unshift(newTask);
+          if (!record.tasks.some(t => t.id === newTask.id)) {
+            record.tasks.unshift(newTask);
+            await saveRoomRecord(record);
 
-            const broadcastMsg = JSON.stringify({
+            broadcastToRoom(currentRoomId, {
               type: 'task:created',
               task: newTask,
               by: data.by || 'Someone'
-            });
-
-            activeRoom.peers.forEach(p => {
-              if (p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(broadcastMsg);
-              }
             });
             broadcastWallpaperUpdate(currentRoomId);
           }
@@ -796,25 +1086,20 @@ wss.on('connection', (ws: WebSocket) => {
         }
 
         case 'task:update': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
-          const index = activeRoom.tasks.findIndex(t => t.id === data.task.id);
+          const record = getOrCreateRoomRecord(currentRoomId, defaultSeedTasks);
+          const index = record.tasks.findIndex(t => t.id === data.task.id);
           if (index !== -1) {
-            activeRoom.tasks[index] = {
-              ...activeRoom.tasks[index],
+            record.tasks[index] = {
+              ...record.tasks[index],
               ...data.task,
               updatedAt: new Date().toISOString()
             };
+            await saveRoomRecord(record);
 
-            const broadcastMsg = JSON.stringify({
+            broadcastToRoom(currentRoomId, {
               type: 'task:updated',
-              task: activeRoom.tasks[index],
+              task: record.tasks[index],
               by: data.by || 'Someone'
-            });
-
-            activeRoom.peers.forEach(p => {
-              if (p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(broadcastMsg);
-              }
             });
             broadcastWallpaperUpdate(currentRoomId);
           }
@@ -822,16 +1107,17 @@ wss.on('connection', (ws: WebSocket) => {
         }
 
         case 'task:move': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
+          const record = getOrCreateRoomRecord(currentRoomId, defaultSeedTasks);
           const { taskId, newStatus, newUrgency, newImportance } = data;
-          const task = activeRoom.tasks.find(t => t.id === taskId);
+          const task = record.tasks.find(t => t.id === taskId);
           if (task) {
             if (newStatus) task.status = newStatus;
             if (typeof newUrgency === 'boolean') task.urgency = newUrgency;
             if (typeof newImportance === 'boolean') task.importance = newImportance;
             task.updatedAt = new Date().toISOString();
+            await saveRoomRecord(record);
 
-            const broadcastMsg = JSON.stringify({
+            broadcastToRoom(currentRoomId, {
               type: 'task:moved',
               taskId,
               status: task.status,
@@ -839,33 +1125,23 @@ wss.on('connection', (ws: WebSocket) => {
               importance: task.importance,
               by: data.by || 'Someone'
             });
-
-            activeRoom.peers.forEach(p => {
-              if (p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(broadcastMsg);
-              }
-            });
             broadcastWallpaperUpdate(currentRoomId);
           }
           break;
         }
 
         case 'task:delete': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
-          const initialLength = activeRoom.tasks.length;
-          activeRoom.tasks = activeRoom.tasks.filter(t => t.id !== data.taskId);
+          const record = getOrCreateRoomRecord(currentRoomId, defaultSeedTasks);
+          const initialLength = record.tasks.length;
+          record.tasks = record.tasks.filter(t => t.id !== data.taskId);
 
-          if (activeRoom.tasks.length !== initialLength) {
-            const broadcastMsg = JSON.stringify({
+          if (record.tasks.length !== initialLength) {
+            await saveRoomRecord(record);
+
+            broadcastToRoom(currentRoomId, {
               type: 'task:deleted',
               taskId: data.taskId,
               by: data.by || 'Someone'
-            });
-
-            activeRoom.peers.forEach(p => {
-              if (p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(broadcastMsg);
-              }
             });
             broadcastWallpaperUpdate(currentRoomId);
           }
@@ -873,26 +1149,21 @@ wss.on('connection', (ws: WebSocket) => {
         }
 
         case 'task:subtask_toggle': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
-          const task = activeRoom.tasks.find(t => t.id === data.taskId);
+          const record = getOrCreateRoomRecord(currentRoomId, defaultSeedTasks);
+          const task = record.tasks.find(t => t.id === data.taskId);
           if (task) {
             const sub = task.subtasks.find(s => s.id === data.subtaskId);
             if (sub) {
               sub.completed = !sub.completed;
               task.updatedAt = new Date().toISOString();
+              await saveRoomRecord(record);
 
-              const broadcastMsg = JSON.stringify({
+              broadcastToRoom(currentRoomId, {
                 type: 'task:subtask_toggled',
                 taskId: task.id,
                 subtaskId: sub.id,
                 completed: sub.completed,
                 by: data.by || 'Someone'
-              });
-
-              activeRoom.peers.forEach(p => {
-                if (p.ws.readyState === WebSocket.OPEN) {
-                  p.ws.send(broadcastMsg);
-                }
               });
               broadcastWallpaperUpdate(currentRoomId);
             }
@@ -901,8 +1172,8 @@ wss.on('connection', (ws: WebSocket) => {
         }
 
         case 'task:comment': {
-          const activeRoom = getOrCreateRoom(currentRoomId);
-          const task = activeRoom.tasks.find(t => t.id === data.taskId);
+          const record = getOrCreateRoomRecord(currentRoomId, defaultSeedTasks);
+          const task = record.tasks.find(t => t.id === data.taskId);
           if (task) {
             const newComment: TaskComment = {
               id: `c-${Date.now()}`,
@@ -913,18 +1184,13 @@ wss.on('connection', (ws: WebSocket) => {
             };
             task.comments.push(newComment);
             task.updatedAt = new Date().toISOString();
+            await saveRoomRecord(record);
 
-            const broadcastMsg = JSON.stringify({
+            broadcastToRoom(currentRoomId, {
               type: 'task:comment_added',
               taskId: task.id,
               comment: newComment,
               by: newComment.author
-            });
-
-            activeRoom.peers.forEach(p => {
-              if (p.ws.readyState === WebSocket.OPEN) {
-                p.ws.send(broadcastMsg);
-              }
             });
           }
           break;
@@ -940,18 +1206,13 @@ wss.on('connection', (ws: WebSocket) => {
 
   ws.on('close', () => {
     if (currentRoomId && peerId) {
-      const activeRoom = rooms.get(currentRoomId);
-      if (activeRoom) {
-        activeRoom.peers.delete(peerId);
-        const leaveMsg = JSON.stringify({
+      const sessions = peerSessions.get(currentRoomId);
+      if (sessions) {
+        sessions.delete(peerId);
+        broadcastToRoom(currentRoomId, {
           type: 'peer:left',
           peerId,
-          userCount: activeRoom.peers.size
-        });
-        activeRoom.peers.forEach(p => {
-          if (p.ws.readyState === WebSocket.OPEN) {
-            p.ws.send(leaveMsg);
-          }
+          userCount: sessions.size
         });
       }
     }

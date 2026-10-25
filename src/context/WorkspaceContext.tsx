@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import { Task, Subtask, PeerPresence, ActivityNotification, TaskStatus, TaskPriority, TaskDifficulty } from '../types.ts';
 import { sound } from '../utils/audio.ts';
+import { api, RoomSummary, RoomStats, HealthCheckResponse } from '../utils/api.ts';
 
 interface WorkspaceContextType {
   tasks: Task[];
@@ -11,6 +12,8 @@ interface WorkspaceContextType {
   userCount: number;
   notifications: ActivityNotification[];
   selectedTaskId: string | null;
+  databaseHealth: HealthCheckResponse['database'] | null;
+  initialLoading: boolean;
   createTask: (taskData: {
     title: string;
     description?: string;
@@ -34,6 +37,13 @@ interface WorkspaceContextType {
   changeRoom: (newRoomId: string) => void;
   resetWorkspace: () => Promise<void>;
   dismissNotification: (id: string) => void;
+  refreshTasks: () => Promise<void>;
+  fetchRooms: () => Promise<RoomSummary[]>;
+  createNewRoom: (roomId: string, name?: string) => Promise<boolean>;
+  fetchStats: () => Promise<RoomStats>;
+  exportWorkspace: () => Promise<void>;
+  importWorkspace: (tasks: Task[], mode?: 'replace' | 'merge') => Promise<boolean>;
+  checkDbHealth: () => Promise<void>;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextType | null>(null);
@@ -83,6 +93,8 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
   const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
   const [selectedTaskId, setSelectedTaskIdState] = useState<string | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [databaseHealth, setDatabaseHealth] = useState<HealthCheckResponse['database'] | null>(null);
 
   // Parse room from URL query or default
   const [roomId, setRoomId] = useState<string>(() => {
@@ -118,10 +130,40 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const sendWs = useCallback((payload: object) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(payload));
+      return true;
+    }
+    return false;
+  }, []);
+
+  // Check Database Health
+  const checkDbHealth = useCallback(async () => {
+    try {
+      const health = await api.checkHealth();
+      setDatabaseHealth(health.database);
+    } catch (err) {
+      console.warn('[Workspace] Health check error:', err);
     }
   }, []);
 
-  // Connect WebSocket
+  // Hydrate tasks from Persistent REST API
+  const refreshTasks = useCallback(async () => {
+    try {
+      const fetchedTasks = await api.getTasks(roomId);
+      setTasks(fetchedTasks);
+      setInitialLoading(false);
+    } catch (err) {
+      console.error('[Workspace] Error fetching tasks via REST:', err);
+      setInitialLoading(false);
+    }
+  }, [roomId]);
+
+  // Initial HTTP Hydration (Sub-100ms first render)
+  useEffect(() => {
+    refreshTasks();
+    checkDbHealth();
+  }, [refreshTasks, checkDbHealth]);
+
+  // Connect WebSocket for sub-50ms peer presence & broadcast
   useEffect(() => {
     let isMounted = true;
 
@@ -166,6 +208,7 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
                 setTasks(data.tasks || []);
                 setPeers(data.peers || []);
                 setUserCount(data.userCount || 1);
+                setInitialLoading(false);
                 break;
               }
 
@@ -271,7 +314,7 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
               case 'tasks:synced': {
                 setTasks(data.tasks);
-                addNotification('Workspace reset to template tasks', 'System');
+                addNotification('Workspace synchronized with persistent database', 'System');
                 break;
               }
 
@@ -286,7 +329,6 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         socket.onclose = () => {
           if (!isMounted) return;
           setConnectionStatus('disconnected');
-          // Auto reconnect after 2 seconds
           reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
         };
 
@@ -317,7 +359,6 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       const now = performance.now();
-      // Throttle mouse moves to ~40ms (25fps) to balance smooth presence and bandwidth
       if (now - lastCursorEmitRef.current > 40) {
         lastCursorEmitRef.current = now;
         sendWs({
@@ -358,8 +399,8 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   }, [roomId, sendWs]);
 
-  // Mutator functions with optimistic updates
-  const createTask = useCallback((taskData: {
+  // Mutator functions with optimistic updates + REST fallback for zero data loss
+  const createTask = useCallback(async (taskData: {
     title: string;
     description?: string;
     status?: TaskStatus;
@@ -396,27 +437,44 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     // Optimistic local update
     setTasks(prev => [newTask, ...prev]);
 
-    // Broadcast to server
-    sendWs({
+    // WebSocket broadcast
+    const sent = sendWs({
       type: 'task:create',
       roomId,
       task: newTask,
       by: currentUser.name
     });
+
+    // If WebSocket is not connected or as permanent persistence guarantee, persist via REST
+    if (!sent) {
+      try {
+        await api.createTask(roomId, newTask, currentUser.name);
+      } catch (err) {
+        console.error('REST task persistence failed:', err);
+      }
+    }
   }, [currentUser, roomId, sendWs]);
 
-  const updateTask = useCallback((updatedTask: Task) => {
+  const updateTask = useCallback(async (updatedTask: Task) => {
     setTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
 
-    sendWs({
+    const sent = sendWs({
       type: 'task:update',
       roomId,
       task: updatedTask,
       by: currentUser.name
     });
+
+    if (!sent) {
+      try {
+        await api.updateTask(roomId, updatedTask, currentUser.name);
+      } catch (err) {
+        console.error('REST task update failed:', err);
+      }
+    }
   }, [currentUser.name, roomId, sendWs]);
 
-  const moveTask = useCallback((taskId: string, newStatus?: TaskStatus, newUrgency?: boolean, newImportance?: boolean) => {
+  const moveTask = useCallback(async (taskId: string, newStatus?: TaskStatus, newUrgency?: boolean, newImportance?: boolean) => {
     setTasks(prev => prev.map(t => {
       if (t.id === taskId) {
         return {
@@ -434,7 +492,7 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       sound.playTaskComplete();
     }
 
-    sendWs({
+    const sent = sendWs({
       type: 'task:move',
       roomId,
       taskId,
@@ -443,23 +501,39 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       newImportance,
       by: currentUser.name
     });
+
+    if (!sent) {
+      try {
+        await api.moveTask(roomId, taskId, { status: newStatus, urgency: newUrgency, importance: newImportance }, currentUser.name);
+      } catch (err) {
+        console.error('REST task move failed:', err);
+      }
+    }
   }, [currentUser.name, roomId, sendWs]);
 
-  const deleteTask = useCallback((taskId: string) => {
+  const deleteTask = useCallback(async (taskId: string) => {
     setTasks(prev => prev.filter(t => t.id !== taskId));
     if (selectedTaskId === taskId) {
       setSelectedTaskId(null);
     }
 
-    sendWs({
+    const sent = sendWs({
       type: 'task:delete',
       roomId,
       taskId,
       by: currentUser.name
     });
+
+    if (!sent) {
+      try {
+        await api.deleteTask(roomId, taskId, currentUser.name);
+      } catch (err) {
+        console.error('REST task delete failed:', err);
+      }
+    }
   }, [currentUser.name, roomId, selectedTaskId, setSelectedTaskId, sendWs]);
 
-  const toggleSubtask = useCallback((taskId: string, subtaskId: string) => {
+  const toggleSubtask = useCallback(async (taskId: string, subtaskId: string) => {
     let nowCompleted = false;
     setTasks(prev => prev.map(t => {
       if (t.id === taskId) {
@@ -481,16 +555,24 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       sound.playTaskComplete();
     }
 
-    sendWs({
+    const sent = sendWs({
       type: 'task:subtask_toggle',
       roomId,
       taskId,
       subtaskId,
       by: currentUser.name
     });
+
+    if (!sent) {
+      try {
+        await api.toggleSubtask(roomId, taskId, subtaskId, currentUser.name);
+      } catch (err) {
+        console.error('REST subtask toggle failed:', err);
+      }
+    }
   }, [currentUser.name, roomId, sendWs]);
 
-  const addComment = useCallback((taskId: string, text: string) => {
+  const addComment = useCallback(async (taskId: string, text: string) => {
     if (!text.trim()) return;
     const comment = {
       id: `c-${Date.now()}`,
@@ -510,12 +592,20 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return t;
     }));
 
-    sendWs({
+    const sent = sendWs({
       type: 'task:comment',
       roomId,
       taskId,
       comment
     });
+
+    if (!sent) {
+      try {
+        await api.addComment(roomId, taskId, text, currentUser.name, currentUser.color);
+      } catch (err) {
+        console.error('REST add comment failed:', err);
+      }
+    }
   }, [currentUser, roomId, sendWs]);
 
   const updateProfile = useCallback((name: string, color: string) => {
@@ -541,15 +631,46 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const resetWorkspace = useCallback(async () => {
     try {
-      await fetch('/api/reset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ room: roomId })
-      });
+      await api.resetWorkspace(roomId);
+      await refreshTasks();
     } catch (e) {
       console.error('Failed to reset workspace via API:', e);
     }
+  }, [roomId, refreshTasks]);
+
+  const fetchRooms = useCallback(async () => {
+    return await api.getRooms();
+  }, []);
+
+  const createNewRoom = useCallback(async (newId: string, name?: string) => {
+    const res = await api.createRoom(newId, name);
+    return res.success;
+  }, []);
+
+  const fetchStats = useCallback(async () => {
+    return await api.getRoomStats(roomId);
   }, [roomId]);
+
+  const exportWorkspace = useCallback(async () => {
+    const blob = await api.exportRoom(roomId);
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `onedot-workspace-${roomId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  }, [roomId]);
+
+  const importWorkspace = useCallback(async (importedTasks: Task[], mode: 'replace' | 'merge' = 'merge') => {
+    const res = await api.importRoom(roomId, importedTasks, mode);
+    if (res.success) {
+      await refreshTasks();
+      return true;
+    }
+    return false;
+  }, [roomId, refreshTasks]);
 
   return (
     <WorkspaceContext.Provider
@@ -562,6 +683,8 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         userCount,
         notifications,
         selectedTaskId,
+        databaseHealth,
+        initialLoading,
         createTask,
         updateTask,
         moveTask,
@@ -572,7 +695,14 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setSelectedTaskId,
         changeRoom,
         resetWorkspace,
-        dismissNotification
+        dismissNotification,
+        refreshTasks,
+        fetchRooms,
+        createNewRoom,
+        fetchStats,
+        exportWorkspace,
+        importWorkspace,
+        checkDbHealth
       }}
     >
       {children}
