@@ -1,0 +1,6 @@
+{
+  "name": "OneDot Task Workspace",
+  "description": "Efficient task management platform with real-time collaborative editing, Kanban, priority matrix, and peer presence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
